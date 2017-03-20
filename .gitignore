@@ -1,0 +1,5 @@
+out/*
+*.png
+*.txt
+test.py
+data/*
