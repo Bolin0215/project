@@ -5,7 +5,7 @@ import os
 
 def main():
     # dir = os.path.join('..', 'out', '10_100_56_0.9_adamax_0.002')
-    dir = os.path.join('..', 'out', '20_50_56_0.8_adam_0.002')
+    dir = os.path.join('..', 'out', '20_50_56_0.8_adam_0.002_copy')
     out_file = 'out'
     # out_file = 'out'
     filename = os.path.join(dir, out_file)
@@ -44,7 +44,7 @@ def plot(train_acc, val_acc, test_acc):
                        'val_acc':np.array(val_acc, dtype='float32'),
                        'test_acc':np.array(test_acc, dtype='float32')},
                       index=list(range(1,len(train_acc)+1)))
-    plt.show(df.plot(title='Copy Mechanism'))
+    plt.show(df.plot(title='Seq2seq Attention with Copy Mechanism'))
 
 
 if __name__ == "__main__":

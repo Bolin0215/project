@@ -51,24 +51,26 @@ def save(args, data):
 
 
 def prepro_each(args):
-    with open(os.path.join(args.source_dir, 'func_y'), 'r') as f:
+    with open(os.path.join(args.source_dir, 'nfunc_y'), 'r') as f:
         logics = f.readlines()
-    with open(os.path.join(args.source_dir, 'sent_x'), 'r') as f:
+    with open(os.path.join(args.source_dir, 'nsent_x'), 'r') as f:
         utters = f.readlines()
     import re
     processed = []
+    cnt = 0
     for logic, utter in zip(logics, utters):
         if re.search(r'\d{4}-\d{2}-\d{2}', logic) or re.search(r'\d{4}-\d{2}', logic) or  re.search(r'\d{2}-\d{2}-\d{4}', logic):
             continue
         logic = logic.strip()
-        for w in logic.split(' '):
+        for w in logic.split('\t'):
             word_counter.setdefault(w, 0)
             word_counter[w] += 1
-        utter = utter.strip().replace(',','').replace('?','').replace('.','')
-        utter = utter.split('-')
-        utter = ' - '.join(utter)
+        utter = utter.strip().replace(',','').replace('?','')
+        # utter = utter.split('-')
+        # utter = ' - '.join(utter)
         if utter == '' or logic == '':
             continue
+        cnt += 1
         processed.append({'utt':utter, 'logic':logic})
 
     np.random.shuffle(processed)

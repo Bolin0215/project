@@ -8,7 +8,7 @@ from th.nn import dropout_layer, param_init_gru_cond, gru_cond_layer
 from th.optimizer import adamax, adam
 from th.utils import *
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
-# theano.config.exception_verbosity='high'
+theano.config.exception_verbosity='high'
 # theano.config.optimizer='fast_compile'
 
 class Model:
@@ -32,7 +32,7 @@ class Model:
         self.predict = None
         self.out = None
         self.cost = None
-        self.clip_c = 1.
+        self.clip_c = -1.
 
         self.init_params()
         self.init_tparams()
@@ -60,13 +60,12 @@ class Model:
 
     def init_params(self):
         self.params = OrderedDict()
-        #embedding
         self.params = self.init_emb(self.params)
 
         self.params = param_init_lstm(self.params, self.args.embeddingSize, self.args.hiddenSize, prefix='lstm_encoder')
-        # self.params = param_init_lstm(self.params, self.args.embeddingSize, self.args.hiddenSize, prefix='lstm_encoder_r')
+        self.params = param_init_lstm(self.params, self.args.embeddingSize, self.args.hiddenSize, prefix='lstm_encoder_r')
 
-        ctxdim = 1 * self.args.hiddenSize
+        ctxdim = 2 * self.args.hiddenSize
 
         self.params = param_init_ff(self.params, ctxdim, self.args.hiddenSize, prefix='ff_state')
 
@@ -87,7 +86,7 @@ class Model:
         self.y = T.matrix('y', dtype='int64') #[N, M]
         self.y_mask = T.matrix('y_mask', dtype='float32') #[N, M]
         self.dropoutRate = T.fscalar('dropout_rate')
-        self.truth_y = T.matrix('truth_y', dtype='int64')
+        self.truth_y = T.matrix('truth_y', dtype='int64') #[N, M]
         self.memory_mask = T.ftensor3('memory_mask')
 
         trng = RandomStreams(200)
@@ -109,9 +108,12 @@ class Model:
 
         embed_x = dropout_layer(embed_x, self.dropoutRate, trng)
         embed_y = dropout_layer(embed_y, self.dropoutRate, trng)
-
+        #########################
+        # Encoder
+        #########################
         Hx_f = lstm_layer(self.tparams, embed_x, self.args.embeddingSize, self.args.hiddenSize, self.x_mask, prefix='lstm_encoder')
-        ctx = Hx_f
+        Hx_b = lstm_layer(self.tparams, embed_x[::-1], self.args.embeddingSize, self.args.hiddenSize, self.x_mask[::-1], prefix='lstm_encoder_r')[::-1]
+        ctx = T.concatenate([Hx_f, Hx_b], axis=2)
 
         ctx_mean = (ctx * self.x_mask[:, :, None]).sum(0)/self.x_mask.sum(0)[:, None]
         init_state = ff_layer(self.tparams, ctx_mean, activ='tanh', prefix='ff_state')
@@ -119,6 +121,9 @@ class Model:
         embed_y_shifted = T.zeros_like(embed_y)
         embed_y_shifted = T.set_subtensor(embed_y_shifted[1:], embed_y[:-1])
         embed_y = embed_y_shifted
+        #########################
+        # Decoder
+        #########################
 
         proj = gru_cond_layer(self.tparams, embed_y, ctx, mask=self.y_mask, context_mask=self.x_mask, one_step=False, init_state=init_state, prefix='decoder')
 
@@ -128,11 +133,10 @@ class Model:
 
         logit = ff_layer(self.tparams, proj_h, prefix='logit_lstm')
 
-        # if self.args.copymode:
-        #     logit = T.concatenate([T.exp(logit), alpha], axis=2)
         logit_shp = logit.shape
         if self.args.memorymode:
-            sim_alpha = sim_layer(self.tparams, proj_h, proj_h, self.y_mask, prefix='sim') #[N, M, N]
+            sim_alpha1 = sim_layer(self.tparams, proj_h, proj_h, self.y_mask, prefix='sim') #[N, M, N]
+            sim_alpha = sim_alpha1 * self.memory_mask
             logit_p = T.concatenate([logit, sim_alpha], axis=2)
             logit = T.concatenate(
                 [T.exp(logit - logit_p.max(2)[:, :, None]), T.exp(sim_alpha - logit_p.max(2)[:, :, None]) * self.memory_mask],
@@ -152,7 +156,7 @@ class Model:
         if self.args.memorymode:
             self.cost1 = - T.log(self.out[T.arange(self.out.shape[0]), self.truth_y.flatten()] + 1e-10)
         else:
-            self.cost1 = - T.log(self.out[T.arange(self.out.shape[0]), self.y.flatten()] + 1e-10)
+            self.cost1 = - T.log(self.out[T.arange(self.out.shape[0]), self.y.flatten()]  + 1e-10)
         self.cost1 = self.cost1.reshape([self.y.shape[0], self.y.shape[1]])
         self.cost = (self.cost1 * self.y_mask).sum(0).mean()
 
@@ -162,6 +166,7 @@ class Model:
             self.inputs = [self.x, self.x_mask, self.y, self.y_mask, self.truth_y, self.memory_mask, self.dropoutRate]
             self.inputs_pred = [self.x, self.x_mask, self.y, self.y_mask, self.memory_mask, self.dropoutRate]
             self.f_pred = theano.function(self.inputs_pred, self.predict)
+            self.f_debug = theano.function(self.inputs_pred, [self.out, sim_alpha, sim_alpha1])
         else:
             self.inputs = [self.x, self.x_mask, self.y, self.y_mask, self.dropoutRate]
             self.f_pred = theano.function(self.inputs, self.predict)
@@ -179,6 +184,7 @@ class Model:
             self.grads = new_grads
 
         lr = T.scalar(name='lr', dtype=theano.config.floatX)
+        self.f_grad_debug = theano.function(self.inputs, self.grads)
         self.f_grad_acc, self.f_update = eval(self.args.optimizer)(lr, self.tparams, self.grads, self.inputs, self.cost, self.args.not_train_params)
 
     def build_Sampler(self):
@@ -195,8 +201,10 @@ class Model:
             embed_y = T.concatenate([embed_y, embed_x.reshape([self.x.shape[0], self.args.embeddingSize])], axis=0)
 
         Hx_f = lstm_layer(self.tparams, embed_x, self.args.embeddingSize, self.args.hiddenSize, self.x_mask, prefix='lstm_encoder')
+        Hx_b = lstm_layer(self.tparams, embed_x[::-1], self.args.embeddingSize, self.args.hiddenSize, self.x_mask[::-1],
+                          prefix='lstm_encoder_r')[::-1]
+        ctx = T.concatenate([Hx_f, Hx_b], axis=2)
 
-        ctx = Hx_f
         ctx_mean = ctx.mean(0)
         init_state = ff_layer(self.tparams, ctx_mean, activ='tanh', prefix='ff_state')
 
@@ -205,19 +213,22 @@ class Model:
         self.f_init = theano.function([self.x, self.x_mask], outs, name='f_init')
         print ('Done')
 
-        self.y = T.vector('y_sampler', dtype='int64')#[1, 1]
-        init_state = T.matrix('init_state', dtype='float32')
-        self.memory = T.matrix('memory',dtype='float32')
+        self.y = T.vector('y_sampler', dtype='int64')#[M]
+        init_state = T.matrix('init_state', dtype='float32')#[M, dim]
+        self.memory = T.ftensor3('memory')
+        self.memory_mask = T.matrix('memory_mask', dtype='float32')
         emb = T.switch(self.y[:,None] < 0,
                        T.alloc(0., 1, self.tparams['Update_out_emb'].shape[1]),
                        embed_y[self.y])
+        emb = emb.reshape([self.y.shape[0], self.args.embeddingSize])
 
         proj = gru_cond_layer(self.tparams, emb, ctx, mask=None, context_mask=self.x_mask, one_step=True, init_state=init_state, prefix='decoder')
-        next_state = proj[0] #[1, dim]
-        ctxs = proj[1] #[1, dim_ctx]
-        alpha = proj[2] #[1, N_en]
+        next_state = proj[0] #[M, dim]
+        ctxs = proj[1] #[M, dim_ctx]
+        alpha = proj[2] #[M, N_en]
 
-        logit = ff_layer(self.tparams, next_state, prefix='logit_lstm')
+        logit = ff_layer(self.tparams, next_state, prefix='logit_lstm')#[M, vocab_size]
+
 
         if self.args.copymode:
             logit_p = T.concatenate([logit, alpha], axis=1)
@@ -225,11 +236,12 @@ class Model:
                                          T.exp(alpha - logit_p.max(1)[:, None]) * self.x_mask.transpose()], axis=1)
             next_probs = logit / logit.max(1, keepdims=True)
         elif self.args.memorymode:
-            sim_alpha = sim_layer(self.tparams, next_state, self.memory, self.y_mask, prefix='sim')  # [M, N]
+            memory = self.memory #[N, M, dim]
+            sim_alpha = sim_layer(self.tparams, next_state, memory, self.y_mask, one_step=True, prefix='sim')  # [M, N]
             logit_p = T.concatenate([logit, sim_alpha], axis=1)
             logit = T.concatenate(
                 [T.exp(logit - logit_p.max(1)[:, None]),
-                 T.exp(sim_alpha - logit_p.max(1)[:, None])],
+                 T.exp(sim_alpha - logit_p.max(1)[:, None])* self.memory_mask],
                 axis=1)
             next_probs = logit / logit.sum(1, keepdims=True)
         else:
@@ -241,7 +253,7 @@ class Model:
         if self.args.copymode:
             inps = [self.x, self.x_mask, self.y, ctx, init_state]
         elif self.args.memorymode:
-            inps = [self.x_mask, self.y, ctx, self.memory, init_state]
+            inps = [self.x_mask, self.y, ctx, self.memory, self.memory_mask, init_state]
         else:
             inps = [self.x_mask, self.y, ctx, init_state]
         outs = [next_probs, next_sample, next_state]

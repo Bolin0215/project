@@ -6,6 +6,7 @@ import argparse
 from seq2seq.model import Model
 import datetime
 from seq2seq.textData import textData
+import copy
 
 class Tagger:
     def __init__(self):
@@ -21,18 +22,17 @@ class Tagger:
         dir = os.path.join('.','data','nl2lf')
         parser.add_argument('--emb_dir', default=dir,help="embedding vectors directory")
         parser.add_argument('--data_dir', default=dir,help='data directory')
-        parser.add_argument('--lrate', type=float, default=0.02, help='learning rate')
+        parser.add_argument('--lrate', type=float, default=0.002, help='learning rate')
         parser.add_argument('--embeddingSize', type=int, default=50)
         parser.add_argument('--dropoutRate', type=float, default=1.0)
         parser.add_argument('--batchSize', type=int, default=20)
-        parser.add_argument('--hiddenSize', type=int, default=56)
-        parser.add_argument('--epochs', type=int, default=100)
-        parser.add_argument('--mode', default='train', help='train/test')
+        parser.add_argument('--hiddenSize', type=int, default=100)
+        parser.add_argument('--epochs', type=int, default=300)
+        parser.add_argument('--mode', default='train', help='train/test, now only train')
         parser.add_argument('--preTrainEmbed', type=bool, default=False)
         parser.add_argument('--optimizer', default='adam')
-        parser.add_argument('--attention', type=bool, default=True)
         parser.add_argument('--copymode', type=bool, default=False)
-        parser.add_argument('--memorymode',type=bool,default=False)
+        parser.add_argument('--memorymode',type=bool,default=True)
         parser.add_argument('--maxLengthEnco', type=int, default=50)
         parser.add_argument('--maxLengthDeco', type=int, default=70)
         out_dir = os.path.join('.','out')
@@ -65,7 +65,7 @@ class Tagger:
         print ('Start training...')
         fout = open(self.out_file, 'w')
         fout.write('Embedding vector size is {}\n'.format(self.args.embeddingSize))
-        fout.write('Hidden Layer units is {}\n'.format(self.args.hiddenSize))
+        fout.write('Hidden layer units is {}\n'.format(self.args.hiddenSize))
         fout.write('Learning rate is {}\n'.format(self.args.lrate))
         fout.write('Batch size is {}\n'.format(self.args.batchSize))
         fout.write('Dropout rate is {}\n'.format(self.args.dropoutRate))	 
@@ -75,7 +75,7 @@ class Tagger:
             totalTrainLoss = 0.0
             totalTrainAcc = 0.0
             bt = datetime.datetime.now()
-            xl, yl, predl = [], [], []
+            xl, truth_yl, predl = [], [], []
             for nextBatch in tqdm(trainBatches):
                 self.globalStep += 1
                 x, x_mask, y, y_mask, truth_y, memory_mask = nextBatch.x, nextBatch.x_mask, nextBatch.y, nextBatch.y_mask, \
@@ -83,38 +83,13 @@ class Tagger:
                 dp = self.args.dropoutRate
                 if self.args.memorymode:
                     loss = self.model.f_grad_acc(x, x_mask, y, y_mask, truth_y, memory_mask, dp)
+
                     predicts = self.model.f_pred(x, x_mask, y, y_mask, memory_mask, dp)
                 else:
                     loss = self.model.f_grad_acc(x, x_mask, y, y_mask, dp)
                     predicts = self.model.f_pred(x, x_mask, y, y_mask, dp)
                 if np.isnan(loss):
                     print ('Loss of batch {} is Nan'.format(self.globalStep))
-                    # logit,out1,out = self.model.f_debug(x, x_mask, y, y_mask, dp)
-                    # print (x)
-                    # print (x_mask)
-                    # print (y)
-                    # print (y_mask)
-                    # print (x_mask.shape)
-                    # print (y_mask.shape)
-                    # with open('out/params/' + str(self.globalStep), 'w') as f:
-                    #     logit = logit.reshape((logit.shape[0]*logit.shape[1], logit.shape[2]))
-                    #     for i in range(out1.shape[0]):
-                    #         for j in range(out1.shape[1]):
-                    #             f.write(str(out1[i][j]) + ' ')
-                    #         f.write('\n---------------\n')
-                    #     f.write('\n---------------\n')
-                    #     for i in range(out.shape[0]):
-                    #         for j in range(out.shape[1]):
-                    #             f.write(str(out[i][j])  + ' ')
-                    #         f.write('\n------------------\n')
-                    #     f.write('\n')
-                    # # params = self.model.save_params()
-                    # # with open('out/params','a+') as f:
-                    # #     f.write(str(params))
-                    # # return
-                    params = self.model.save_params()
-                    with open('out/params/' + str(self.globalStep), 'w') as f:
-                        f.write(str(params))
                     return
 
                 totalTrainLoss += loss
@@ -124,16 +99,14 @@ class Tagger:
                     totalTrainAcc += self.accuracy_score(y, predicts)
 
                 xl.extend(x.transpose().tolist())
-                yl.extend(y.transpose().tolist())
+                truth_yl.extend(truth_y.transpose().tolist())
                 predl.extend(predicts.transpose().tolist())
-
                 self.model.f_update(self.args.lrate)
-                params = self.model.save_params()
 
             out_dir = os.path.join(self.out_dir, 'train')
             if not os.path.isdir(out_dir):
                 os.mkdir(out_dir)
-            self.show_result(out_dir, e, xl, yl, predl)
+            self.show_result(out_dir, e, xl, truth_yl, predl)
             et = datetime.datetime.now()
 
             trainLoss = totalTrainLoss / len(trainBatches)
@@ -207,17 +180,44 @@ class Tagger:
                 for idx, i in enumerate(y_):
                     if i == 0 or i == 2: break
                     if i >= self.textData.out_vocabSize:
+                        # Memory mode:
+                        # consider this example: ..... sandbox.medals .... sandbox.medals
+                        # the 2nd medals is a reference of the 1st medals
+                        # so the index of the 2nd medals is the out_vocabSize + pos(1st medals)
                         if self.args.copymode:
                             f.write(self.textData.in_idx2word[x_[int(i-self.textData.out_vocabSize)]] + ' ')
                         else:
+                            tmpi = i - self.textData.out_vocabSize
+                            index = int(tmpi)
+                            tmpi = y_[int(tmpi)]
+                            while tmpi >= self.textData.out_vocabSize:
+                                tmpi = tmpi - self.textData.out_vocabSize
+                                index = int(tmpi)
+                                tmpi = y_[int(tmpi)]
                             cnt = 0
-                            for j in range(idx):
-                                if y_[j] == i:
-                                    cnt += 1
+                            for j in range(index):
+                                if y_[j] == tmpi: cnt += 1
                             if cnt == 0:
-                                f.write(self.textData.out_idx2word[y_[int(i - self.textData.out_vocabSize)]] + ' ')
+                                f.write(self.textData.out_idx2word[tmpi] + ' ')
                             else:
-                                f.write(self.textData.out_idx2word[y_[int(i - self.textData.out_vocabSize)]] + '_' + str(cnt))
+                                f.write(
+                                    self.textData.out_idx2word[tmpi] + '_' + str(
+                                        cnt) + ' ')
+                        continue
+                    if self.args.memorymode and 'sandbox' in self.textData.out_idx2word[i] and len(self.textData.out_idx2word[i].split('.')) == 2:
+                        # Memory mode:
+                        # consider this example: ..... sandbox.medals .... sandbox.medals_1
+                        # the 2nd medals is a new table, so the notation of the 2nd medals is different from the 1st.
+                        # but the index of the 2nd medals is in the out_vocabSize
+                        cnt = 0
+                        for j in range(idx):
+                            if y_[j] == i: cnt += 1
+                        if cnt == 0:
+                            f.write(self.textData.out_idx2word[i] + ' ')
+                        else:
+                            f.write(
+                                    self.textData.out_idx2word[i] + '_' + str(
+                                        cnt) + ' ')
                         continue
                     f.write(self.textData.out_idx2word[i] + ' ')
                 f.write('\n')
@@ -228,16 +228,33 @@ class Tagger:
                         if self.args.copymode:
                             f.write(self.textData.in_idx2word[x_[int(i-self.textData.out_vocabSize)]] + ' ')
                         else:
+                            tmpi = i - self.textData.out_vocabSize
+                            index = int(tmpi)
+                            tmpi = p_[int(tmpi)]
+                            while tmpi >= self.textData.out_vocabSize:
+                                tmpi = tmpi - self.textData.out_vocabSize
+                                index = int(tmpi)
+                                tmpi = p_[int(tmpi)]
                             cnt = 0
-                            for j in range(idx):
-                                if p_[j] == i:
-                                    cnt += 1
+                            for j in range(index):
+                                if p_[j] == tmpi: cnt += 1
                             if cnt == 0:
-                                f.write(self.textData.out_idx2word[p_[int(i - self.textData.out_vocabSize)]] + ' ')
+                                f.write(self.textData.out_idx2word[tmpi] + ' ')
                             else:
                                 f.write(
-                                    self.textData.out_idx2word[p_[int(i - self.textData.out_vocabSize)]] + '_' + str(
-                                        cnt))
+                                    self.textData.out_idx2word[tmpi] + '_' + str(
+                                        cnt) + ' ')
+                        continue
+                    if self.args.memorymode:
+                        cnt = 0
+                        for j in range(idx):
+                            if p_[j] == i: cnt += 1
+                        if cnt == 0 or len(self.textData.out_idx2word[i].split('.')) != 2:
+                            f.write(self.textData.out_idx2word[i] + ' ')
+                        else:
+                            f.write(
+                                self.textData.out_idx2word[i] + '_' + str(
+                                    cnt) + ' ')
                         continue
                     f.write(self.textData.out_idx2word[i] + ' ')
                 f.write('\n')
@@ -247,20 +264,180 @@ class Tagger:
         ret = self.model.f_init(x[:,None], x_mask[:,None])
         next_state, ctx0 = ret[0], ret[1]
         next_w = -1 * np.ones((1,)).astype('int64')
+        memory = np.array([],dtype='float32')
+        memory_mask = np.zeros((1,1)).astype('float32')
 
         for i in range(self.args.maxLengthDeco):
+            # print (i)
             if self.args.copymode:
                 inps = [x[:,None], x_mask[:,None], next_w, ctx0, next_state]
             elif self.args.memorymode:
-                inps = [x_mask[:,None], next_w, ctx0, next_state]
+                if i == 0:
+                    tmpmemory = np.zeros(next_state.shape).astype('float32')
+                else:
+                    tmpmemory = memory
+                tmpmemory = tmpmemory.reshape([tmpmemory.shape[0], 1, tmpmemory.shape[1]])
+                inps = [x_mask[:,None], next_w, ctx0, tmpmemory, memory_mask, next_state]
             else:
                 inps = [x_mask[:,None], next_w, ctx0, next_state]
             ret = self.model.f_next(*inps)
             next_p, next_w, next_state = ret[0], ret[1], ret[2]
+            while next_w[0] >= self.textData.out_vocabSize:
+                next_w[0] -= self.textData.out_vocabSize
+                next_w[0] = sample[next_w[0]]
             nw = next_p[0].argmax()
+            if i == 0:
+                memory = next_state
+                if nw >= self.textData.out_vocabSize or (nw >= 3 and nw < self.textData.table_count + 3):
+                    memory_mask = np.ones((1,1)).astype('float32')
+                else:
+                    memory_mask = np.zeros((1,1)).astype('float32')
+            else:
+                memory = np.concatenate([memory, next_state], axis=0)
+                if nw >= self.textData.out_vocabSize or (nw >= 3 and nw < self.textData.table_count + 3):
+                    memory_mask = np.concatenate([memory_mask, np.ones((1,1)).astype('float32')], axis=1)
+                else:
+                    memory_mask = np.concatenate([memory_mask, np.zeros((1,1)).astype('float32')], axis=1)
+
             sample.append(nw)
             if nw == 2:
                 break
 
         return sample
+
+    def beam_sample(self, x, x_mask):
+        sample = []
+        sample_score = []
+        k = 5 #beam size
+        live_k = 5
+        dead_k = 0
+
+        hyp_samples = [[]] * live_k
+        hyp_scores = np.zeros(live_k).astype('float32')
+        hyp_states = []
+
+        ret = self.model.f_init(x[:,None], x_mask[:,None])
+        next_state, ctx0 = ret[0], ret[1]
+        next_w = -1 * np.ones((1,)).astype('int64')
+        memory = np.array([],dtype='float32')
+        memory_mask = np.zeros((1,1)).astype('float32')
+        # print (ctx0)
+
+        for i in range(self.args.maxLengthDeco):
+            if i != 0:
+                ctx = np.tile(ctx0, [live_k, 1])
+                mask = np.tile(x_mask[:,None], [1,live_k])
+            else:
+                ctx = ctx0
+                mask = x_mask[:,None]
+            if self.args.copymode:
+                inps = [x[:,None], x_mask[:,None], next_w, ctx, next_state]
+            elif self.args.memorymode:
+                if i == 0:
+                    tmpmemory = np.zeros(next_state.shape).astype('float32')
+                    tmpmemory = tmpmemory.reshape([tmpmemory.shape[0], 1, tmpmemory.shape[1]])
+                else:
+                    tmpmemory = memory
+                inps = [mask, next_w, ctx, tmpmemory, memory_mask, next_state]
+            else:
+                inps = [mask, next_w, ctx, next_state]
+            ret = self.model.f_next(*inps)
+            next_p, next_w, next_state = ret[0], ret[1], ret[2]
+            if i == 0:
+                memory = tmpmemory
+            memory = np.transpose(memory, (1, 0, 2))
+
+            if i == 0:
+                cand_scores = - np.log(next_p.flatten())
+                cand_flat = cand_scores.flatten()
+                ranks_flat = cand_flat.argsort()[:(k - dead_k)]
+
+                voc_size = next_p.shape[1]
+                trans_indices = ranks_flat / voc_size
+                word_indices = ranks_flat % voc_size
+                costs = cand_flat[ranks_flat]
+
+            else:
+                cand_scores = hyp_scores[:, None] - np.log(next_p) #[[p_word1, p_word2, ...],[p_word1, p_word2, ...]...]
+                cand_flat = cand_scores.flatten()
+                ranks_flat = cand_flat.argsort()[:(k-dead_k)]
+
+                voc_size = next_p.shape[1]
+                trans_indices = ranks_flat / voc_size
+                word_indices = ranks_flat % voc_size
+                costs = cand_flat[ranks_flat]
+
+            new_hyp_samples = []
+            new_hyp_scores = np.zeros(k - dead_k).astype('float32')
+            new_hyp_states = []
+            new_memory = []
+            new_memory_mask = []
+
+            for idx, [ti, wi] in enumerate(zip(trans_indices, word_indices)):
+                ti = int(ti)
+                wi = int(wi)
+                new_hyp_samples.append(hyp_samples[ti] + [wi])
+                nw = wi
+                new_hyp_scores[idx] = copy.copy(costs[idx])
+                new_hyp_states.append(copy.copy(next_state[ti]))
+
+                if i == 0:
+                    new_memory.append(copy.copy(next_state[ti]))
+                    if nw >= self.textData.out_vocabSize or (nw >= 3 and nw < self.textData.table_count + 3):
+                        new_memory_mask.append(np.ones((1,)).astype('float32'))
+                    else:
+                        new_memory_mask.append(np.zeros((1,)).astype('float32'))
+                else:
+                    tmpmemory = np.concatenate([memory[ti], next_state[ti]])
+                    new_memory.append(tmpmemory)
+                    if nw >= self.textData.out_vocabSize or (nw >= 3 and nw < self.textData.table_count + 3):
+                        tmpmemory_mask = np.concatenate([memory_mask[ti], np.ones((1,)).astype('float32')])
+                        new_memory_mask.append(tmpmemory_mask)
+                    else:
+                        tmpmemory_mask = np.concatenate([memory_mask[ti], np.zeros((1,)).astype('float32')])
+                        new_memory_mask.append(tmpmemory_mask)
+
+            new_live_k = 0
+            hyp_samples = []
+            hyp_scores = []
+            hyp_states = []
+            memory = []
+            memory_mask = []
+
+            for idx in range(len(new_hyp_samples)):
+                if new_hyp_samples[idx][-1] == 2:
+                    sample.append(new_hyp_samples[idx])
+                    sample_score.append(new_hyp_scores[idx])
+                    dead_k += 1
+                else:
+                    new_live_k += 1
+                    hyp_samples.append(new_hyp_samples[idx])
+                    hyp_scores.append(new_hyp_scores[idx])
+                    hyp_states.append(new_hyp_states[idx])
+                    memory.append(new_memory[idx])
+                    memory_mask.append(new_memory_mask[idx])
+
+            hyp_scores = np.array(hyp_scores)
+            live_k = new_live_k
+
+            if new_live_k < 1:
+                break
+            if dead_k >= k:
+                break
+
+            next_w = np.array([w[-1] for w in hyp_samples])
+            next_state = np.array(hyp_states)
+            memory = np.array(memory)
+            if i == 0:
+                memory = memory.reshape([memory.shape[0], 1, memory.shape[1]])
+            memory = np.transpose(memory, (1,0,2))
+            memory_mask = np.array(memory_mask)
+
+        if live_k > 0:
+            for idx in range(live_k):
+                sample.append(hyp_samples[idx])
+                sample_score.append(hyp_scores[idx])
+        sample_score = np.array(sample_score)
+        ss = sample[sample_score.argmin()]
+        return ss
 

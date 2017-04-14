@@ -268,22 +268,22 @@ def param_init_sim(params, dim_left, dim_right, prefix='similarity'):
 
     return params
 
-def sim_layer(tparams, inputs, context, context_mask=None, prefix='similarity'):
+def sim_layer(tparams, inputs, context, context_mask=None, one_step=False,prefix='similarity'):
     nstep = inputs.shape[0]
     n_samples = inputs.shape[1]
     def _step(x_, a_, ctx_):
         preact = T.dot(ctx_, tparams[plus(prefix, 'W')])
-        preact = T.dot(preact, x_)
+        preact = preact * x_[None, :, :]
+        preact = preact.sum(axis=2)
         preact_ = preact.reshape([ctx_.shape[0], ctx_.shape[1]])
-        # preact = T.exp(preact_)
-        # if context_mask:
-        #     preact = preact * context_mask
-        # preact = preact / preact.sum(0, keepdims=True)
 
         return preact_.T
 
     seqs = [inputs]
-    rval, updates = theano.scan(_step, sequences=seqs,
+    if one_step:
+        rval = _step(*(seqs + [None, context]))
+    else:
+        rval, updates = theano.scan(_step, sequences=seqs,
                                 outputs_info=[T.alloc(0., n_samples, context.shape[0])],
                                 non_sequences=[context],
                                 name=plus(prefix, '_layers'),
